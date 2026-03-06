@@ -1,0 +1,17 @@
+/ALstatuscode,
+/b3_control
+/b3_control.c
+/b3_drive
+/b3_drive.c
+/b3_pp_mode
+/b3_pp_mode.c
+/delta_b3_main
+/delta_b3_main.c
+/ec_delta_b3
+/ec_delta_b3.c
+/five_axis_servo
+/slaveinfo
+/slaveinfo.c
+/soem_test
+/test.c
+/Delta ASDA-x3-E rev0.18.xml
