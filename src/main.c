@@ -1,100 +1,163 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include "axis_ctrl.h"
-#include "ecat_core.h"
+#include <unistd.h>
 #include "global_def.h"
+#include "axis_ctrl.h"
+#include "smc_api.h" 
 
-/************************ 程序入口（极简，仅做初始化和启动） ************************/
+// 辅助函数：阻塞等待运动完成，并实时刷新坐标大屏
+void wait_and_print_status() {
+    usleep(100000); // 稍微延时，等待指令进入队列
+    
+    while(SMC_IsParserRunning() || !SMC_IsMotionDone()) {
+        double px = SMC_GetLogicalPos(SMC_AXIS_X);
+        double py = SMC_GetLogicalPos(SMC_AXIS_Y);
+        double pz = SMC_GetLogicalPos(SMC_AXIS_Z);
+        double pa = SMC_GetLogicalPos(SMC_AXIS_A);
+        int q_cnt = SMC_GetQueueCount();
+        
+        printf("\r[监控大屏] 队列:%3d | X:%8.3f  Y:%8.3f  Z:%8.3f  A:%8.3f   ", 
+               q_cnt, px, py, pz, pa);
+        fflush(stdout);
+        usleep(50000); // 50ms 刷新率 (20FPS)
+    }
+    
+    // 运动彻底结束，打印最终坐标
+    printf("\r[监控大屏] 队列:%3d | X:%8.3f  Y:%8.3f  Z:%8.3f  A:%8.3f   ", 
+           0, SMC_GetLogicalPos(SMC_AXIS_X), SMC_GetLogicalPos(SMC_AXIS_Y), 
+           SMC_GetLogicalPos(SMC_AXIS_Z), SMC_GetLogicalPos(SMC_AXIS_A));
+    printf("\n[提示] 运动已安全完成！\n");
+}
+
 int main(int argc, char *argv[])
 {
-    // 1. 检查命令行参数（指定网卡，如eth0）
-    if (argc < 2)
-    {
-        printf("Usage: %s <EtherCAT网卡名>\n", argv[0]);
-        printf("Example: %s enp7s0\n", argv[0]);
+    if (argc < 2) {
+        printf("用法: sudo %s <EtherCAT网卡名> (例如: sudo ./cnc_core eth0)\n", argv[0]); 
         return 0;
     }
 
-    // 2. 五轴系统参数初始化（配置每个轴的核心参数）
+    // ==========================================
+    // 1. 系统配置与初始化
+    // ==========================================
     axis_sys_init();
+    
+    SMC_ConfigAxisTopology(SMC_AXIS_X, "X轴", 0, 1, 0);
+    SMC_ConfigAxisTopology(SMC_AXIS_Y, "Y轴", 1, 3, 4); // Y轴双驱
+    SMC_ConfigGantrySyncAlarm(SMC_AXIS_Y, 1, 1000, 8000, 100); // 放宽的报警阈值
+    SMC_ConfigAxisTopology(SMC_AXIS_A, "A轴", 0, 2, 0);
+    SMC_ConfigAxisTopology(SMC_AXIS_Z, "Z轴", 0, 5, 0);
+    SMC_ConfigSoftLimit(SMC_AXIS_Z, 1, 0.0, 500.0);
 
-    // 3. 创建实时线程+故障检查线程（适配SOEM的OSAL线程库）
-    if (!osal_thread_create_rt(&thread_rt, 128000, &ecat_thread_rt, NULL))
-    {
-        printf("[线程错误] 实时控制线程创建失败！\n");
+    // 启动内核
+    if (SMC_InitAndStart(argv[1]) != 0) {
         return -1;
     }
-    if (!osal_thread_create(&thread_chk, 128000, &ecat_thread_chk, NULL))
+
+    // ==========================================
+    // 2. 开机默认设置全轴原点 (建立 G54 坐标系)
+    // ==========================================
+    printf("\n[系统] 正在建立初始工件坐标系 (G54)...\n");
+    SMC_SetZero(SMC_AXIS_ALL);
+    sleep(1);
+    printf("[系统] 初始化完毕！准备接受操作员指令。\n");
+
+    // ==========================================
+    // 3. 交互式控制台主循环
+    // ==========================================
+    int choice = -1;
+    while (1) 
     {
-        printf("[线程错误] 故障检查线程创建失败！\n");
-        return -1;
+        printf("\n==============================================\n");
+        printf("           SMC 工业数控测试终端           \n");
+        printf("==============================================\n");
+        printf("  1. 回归原点 (G00 X0 Y0 Z0 A0)\n");
+        printf("  2. 加工图纸 (运行 test.txt)\n");
+        printf("  3. 相对点动 (手动 JOG 输入坐标)\n");
+        printf("  4. 刹车测试 (加工中途触发 Feedhold 平滑暂停)\n");
+        printf("  0. 关机退出系统\n");
+        printf("----------------------------------------------\n");
+        printf("请输入操作编号 (0-4): ");
+        
+        if (scanf("%d", &choice) != 1) {
+            while(getchar() != '\n'); // 清除错误输入缓冲
+            continue;
+        }
+
+        switch (choice) 
+        {
+            case 1:
+                printf("\n[执行] 正在全轴联动回归原点...\n");
+                SMC_GoZero(SMC_AXIS_ALL, 1000.0); // 速度 1000 mm/min
+                wait_and_print_status();
+                break;
+
+            case 2:
+                printf("\n[执行] 开始后台加工图纸 test.txt...\n");
+                if (SMC_RunGCodeFile("test.txt") == 0) {
+                    wait_and_print_status();
+                    printf("\n[成功] ★ 加工完美结束！零件已产出！★\n");
+                }
+                break;
+
+            case 3:
+            {
+                int ax = 0;
+                double dist = 0.0, spd = 1000.0;
+                printf("\n--- 单轴点动面板 ---\n");
+                printf("请选择轴号 (0:X, 1:Y, 2:Z, 3:A, -1:全轴): ");
+                scanf("%d", &ax);
+                printf("请输入移动距离 (mm或度，正负代表方向): ");
+                scanf("%lf", &dist);
+                printf("请输入移动速度 (mm/min): ");
+                scanf("%lf", &spd);
+                
+                printf("\n[执行] 下发 JOG 指令: 轴[%d] 移动 %.3f, 速度 %.1f...\n", ax, dist, spd);
+                SMC_MoveRelative(ax, dist, spd);
+                wait_and_print_status();
+                break;
+            }
+
+            case 4:
+                printf("\n[执行] 启动加工，并在 3 秒后触发平滑刹车暂停测试...\n");
+                if (SMC_RunGCodeFile("test.txt") == 0) {
+                    
+                    // 正常跑 3 秒
+                    for(int i=0; i<30; i++) {
+                        printf("\r[正常加工] X:%8.3f Y:%8.3f  ", SMC_GetLogicalPos(0), SMC_GetLogicalPos(1));
+                        fflush(stdout);
+                        usleep(100000);
+                    }
+                    
+                    // 触发暂停！体验基于虚拟时间轴的平滑减速
+                    printf("\n\n⚠️ [干预] 收到进给保持(Feedhold)指令！系统正在平滑刹车...\n");
+                    SMC_PauseProcessing(); 
+                    
+                    // 停滞观察 3 秒
+                    for(int i=0; i<30; i++) {
+                        printf("\r[暂停停稳] X:%8.3f Y:%8.3f (机床锁定中) ", SMC_GetLogicalPos(0), SMC_GetLogicalPos(1));
+                        fflush(stdout);
+                        usleep(100000);
+                    }
+                    
+                    // 恢复运行
+                    printf("\n\n✅ [干预] 收到恢复(Resume)指令！系统正在平滑加速恢复轨迹...\n");
+                    SMC_ResumeProcessing();
+                    
+                    // 把剩下的跑完
+                    wait_and_print_status();
+                }
+                break;
+
+            case 0:
+                printf("\n[退出] 收到关机指令，准备断开伺服动力...\n");
+                SMC_Close();
+                return 0;
+
+            default:
+                printf("\n[错误] 无效的指令编号！\n");
+                break;
+        }
     }
-    printf("[线程] 实时线程+故障检查线程创建成功\n");
 
-    // 4. ECAT主站一键启动（包含所有初始化步骤）
-    ecat_bringup(argv[1]);
-
-    // 5. 主循环：等待五轴均目标到达，然后正常终止
-    while (!g_all_axis_reach)
-    {
-        osal_usleep(100000); // 100ms轮询，不占用CPU
-    }
-
-    // 6. 程序正常终止，释放资源（工业级规范）
-    printf("\n[五轴系统] 所有轴目标到达，程序开始正常终止！\n");
-    dorun = 0; // 通知实时线程，所有轴失能
-    osal_usleep(2000000); // 延时2ms，让实时线程执行失能逻辑
-
-    for (int i = 0; i < AXIS_NUM; i++) {
-       if (g_axis[i].slave_id > 0) {
-         axis_pdo_write(i, CW_ENABLE_OP ,0);
-       }
-    }
-    ecx_send_processdata(&ctx);
-    osal_usleep(50000); // 50ms延时，确保状态切换
-
-    for (int i = 0; i < AXIS_NUM; i++) {
-       if (g_axis[i].slave_id > 0) {
-         axis_pdo_write(i, CW_SHUTDOWN, 0);
-       }
-    }
-    ecx_send_processdata(&ctx);
-    osal_usleep(100000); // 100ms延时，确认伺服失能完成
-
-    int shutdown_ok = 1;
-    for (int i = 0; i < AXIS_NUM; i++) {
-       if (g_axis[i].slave_id > 0) {
-         uint16 sw = axis_pdo_read_sw(i);
-         if ((sw & SW_MASK) != SW_SHUTDOWN_RDY) {
-           printf("[退出警告] %s 未进入SHUTDOWN_RDY，当前状态字：0x%04X\n", g_axis[i].axis_name, sw);
-           shutdown_ok = 0;
-           }
-         }
-    }
-    if (shutdown_ok) {
-      printf("[退出流程] 所有轴已进入SHUTDOWN_RDY\n");
-    }
-
-    // ========== 步骤2：EtherCAT状态降级（OP→SAFE_OP→INIT） ==========
-    // 第一步：全局切换到SAFE_OP并验证
-    printf("[ECAT] 切换所有从站到SAFE_OP状态...\n");
-    ctx.slavelist[0].state = EC_STATE_SAFE_OP;
-    ecx_writestate(&ctx, 0); // 全局设置SAFE_OP
-    // 验证是否切换成功（和b3_drive一致，带超时检查）
-    if (ecx_statecheck(&ctx, 0, EC_STATE_SAFE_OP, EC_TIMEOUTSTATE) != EC_STATE_SAFE_OP) {
-      printf("[ECAT警告] 切换SAFE_OP失败，但继续执行降级流程\n");
-    }
-
-    // 第二步：全局切换到INIT并验证
-    printf("[ECAT] 切换所有从站到INIT状态...\n");
-    ctx.slavelist[0].state = EC_STATE_INIT;
-    ecx_writestate(&ctx, 0); // 全局设置INIT
-    if (ecx_statecheck(&ctx, 0, EC_STATE_INIT, EC_TIMEOUTSTATE) != EC_STATE_INIT) {
-        printf("[ECAT警告] 切换INIT失败，但继续关闭主站\n");
-    }
-    // ========== 步骤3：最后关闭主站 ==========
-    ecx_close(&ctx);      // 关闭SOEM主站，释放网卡资源
-
-    printf("[五轴系统] 程序正常退出！\n");
     return 0;
 }
