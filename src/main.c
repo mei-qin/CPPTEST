@@ -41,12 +41,16 @@ int main(int argc, char *argv[])
     // ==========================================
     axis_sys_init();
     
-    SMC_ConfigAxisTopology(SMC_AXIS_X, "X轴", 0, 1, 0);
+    SMC_ConfigAxisTopology(SMC_AXIS_A, "A轴", 0, 1, 0);
     SMC_ConfigAxisTopology(SMC_AXIS_Y, "Y轴", 1, 3, 4); // Y轴双驱
     SMC_ConfigGantrySyncAlarm(SMC_AXIS_Y, 1, 1000, 8000, 100); // 放宽的报警阈值
-    SMC_ConfigAxisTopology(SMC_AXIS_A, "A轴", 0, 2, 0);
-    SMC_ConfigAxisTopology(SMC_AXIS_Z, "Z轴", 0, 5, 0);
-    SMC_ConfigSoftLimit(SMC_AXIS_Z, 1, 0.0, 500.0);
+    SMC_ConfigAxisTopology(SMC_AXIS_B, "B轴", 0, 2, 0);
+    SMC_ConfigAxisTopology(SMC_AXIS_X, "X轴", 0, 5, 0);
+    SMC_ConfigAxisTopology(SMC_AXIS_Z, "Z轴", 0, 6, 0);
+    SMC_ConfigSoftLimit(SMC_AXIS_Z, 1, 0.0, 15.0);
+    SMC_ConfigPulsePerUnit(SMC_AXIS_X, 10000.0); // X轴 10000脉冲/mm
+    SMC_ConfigPulsePerUnit(SMC_AXIS_Y, 10000.0); // Y轴 10000脉冲/mm
+    SMC_ConfigPulsePerUnit(SMC_AXIS_Z, 1000.0); // Z轴 10000脉冲/mm
 
     // 启动内核
     if (SMC_InitAndStart(argv[1]) != 0) {

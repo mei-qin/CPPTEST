@@ -6,7 +6,7 @@
 typedef int32_t int32;
 typedef uint16_t uint16;
 /************************ 核心宏定义 ************************/
-#define AXIS_NUM         4      // 五轴核心宏！改此值可灵活增减轴数
+#define AXIS_NUM         5      // 五轴核心宏！改此值可灵活增减轴数
 #define EC_TIMEOUTMON    500     // SOEM超时时间
 #define NSEC_PER_SEC     1000000000
 #define CYCLE_TIME_NS    1000000  // 1ms实时周期，五轴共用
@@ -234,6 +234,25 @@ typedef struct{
     
 }CommandQueue_t;
 
+typedef enum{
 
+    COORD_G53=0, 
+    COORD_G54=1,
+    COORD_G55=2,
+    COORD_G56=3,
+    COORD_G57=4,
+    COORD_G58=5,
+    COORD_G59=6,
+
+}CoordSystem_t;
+
+typedef struct{
+
+    CoordSystem_t current_coord;   // 当前坐标系
+    double work_offsets[6][AXIS_NUM]; // 各坐标系的工件坐标偏移（mm或度），例如 word_offsets[1] 就是 G54 的偏移
+    double current_g53_pos[AXIS_NUM]; // 当前G53坐标位置（机床坐标），实时更新用于UI显示和坐标转换
+    double current_logical_pos[AXIS_NUM];// 当前逻辑坐标位置（相对于当前坐标系），实时更新用于UI显示和控制
+
+}CoordManager_t;
 
 #endif // AXIS_CFG_H

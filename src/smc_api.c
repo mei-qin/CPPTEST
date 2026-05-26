@@ -81,7 +81,7 @@ void SMC_Close(void)
 // ================== 坐标与状态 ==================
 double SMC_GetLogicalPos(int axis_idx) {
     if(axis_idx < 0 || axis_idx >= AXIS_NUM) return 0;
-    return g_axis[axis_idx].current_cmd_pos; 
+    return g_coord_mgr.current_logical_pos[axis_idx]; 
 }
 
 int SMC_IsParserRunning() { return g_parser_ctrl.is_running; }
@@ -160,4 +160,12 @@ void SMC_PauseProcessing(){
 void SMC_ResumeProcessing(){
     g_parser_ctrl.is_paused=0;
     api_motion_resume();
+}
+
+void SMC_ConfigPulsePerUnit(int axis_idx,double pulse_per_unit){
+    if(axis_idx < 0 || axis_idx >= AXIS_NUM) {
+        printf("[SMC_API] 轴索引越界！输入索引：%d，最大索引：%d\n", axis_idx, AXIS_NUM-1);
+        return;
+    }
+    g_axis[axis_idx].pulse_per_unit=pulse_per_unit;
 }

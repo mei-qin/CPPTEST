@@ -35,5 +35,6 @@ extern CommandQueue_t g_cmd_queue;      // 运动命令队列
 extern GCodeState_t g_state;             // 全局G-code状态变量
 extern ParserControl_t g_parser_ctrl;     // 全局G-code解析控制变量
 extern double g_pulse_per_unit[AXIS_NUM]; // 每轴脉冲/单位（如mm）转换系数
+extern CoordManager_t g_coord_mgr; // 坐标系管理器
 
 #endif // GLOBAL_DEF_H

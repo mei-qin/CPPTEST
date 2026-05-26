@@ -14,6 +14,7 @@ UI_Command_t g_ui_cmd={CMD_NONE,0,0,0,0,0,0};
 Interpolator_t g_interpolator={0};
 CommandQueue_t g_cmd_queue={0};
 static double plan_cursor[AXIS_NUM]={0};
+CoordManager_t g_coord_mgr={COORD_G54,{0},{0},{0}};
 /************************ 五轴系统初始化（核心配置，修改此函数即可调整轴参数） ************************/
 static void wait_cmd_accepted(){
     while (g_ui_cmd.execute==1)
@@ -60,15 +61,35 @@ double api_get_cursor(int axis_idx){
 void wait_motion_done(){
     while(g_interpolator.is_moving) osal_usleep(10000);
 }
-void api_set_zero(int axis_idx){
+/*void api_set_zero(int axis_idx){
     g_ui_cmd.axis_idx=axis_idx;
     g_ui_cmd.cmd=CMD_SET_ZERO;
     g_ui_cmd.execute=1;
     wait_cmd_accepted();
 
     api_sync_planner_cursor();
-}
+}*/
 
+void api_set_zero(int axis_idx){
+
+    if(g_coord_mgr.current_coord==COORD_G53){
+        printf("[API] G53坐标系不允许设置零点！\n");
+        return;
+    }
+
+    int coord_idx=g_coord_mgr.current_coord-1; // G54对应0，G55对应1，以此类推
+    for(int i=0;i<AXIS_NUM;i++){
+        if(axis_idx==AXIS_ALL||axis_idx==i){
+            g_coord_mgr.work_offsets[coord_idx][i]=g_coord_mgr.current_g53_pos[i];
+
+            g_coord_mgr.current_logical_pos[i]=0.0; // 设置当前逻辑坐标为0
+            plan_cursor[i]=0.0; // 同步规划器光标
+        }
+    }
+    printf("[API] 已设置 %s 坐标系零点，当前G53位置 (%.3f, %.3f, %.3f)\n", 
+            (g_coord_mgr.current_coord==COORD_G54)?"G54":"G55",
+            g_coord_mgr.current_g53_pos[0], g_coord_mgr.current_g53_pos[1], g_coord_mgr.current_g53_pos[2]);
+}
 
 
 void api_go_zero(int axis_idx,double speed){

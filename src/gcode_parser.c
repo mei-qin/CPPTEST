@@ -83,11 +83,24 @@ int parse_gcode_line(const char *gcode_line)
 
         double run_speed_mm=is_G00?RAPID_SPEED_MM_MIN:g_state.feedrate_mm_min;
 
+        double machine_target_pos[AXIS_NUM];
+        double machine_start_pos[AXIS_NUM];
+
+        for(int i=0;i<AXIS_NUM;i++){
+            if(g_coord_mgr.current_coord==COORD_G53){
+                machine_target_pos[i]=target_pos[i];
+                machine_start_pos[i]=start_pos[i];
+            }else{
+                int idx=g_coord_mgr.current_coord-1;
+                machine_target_pos[i]=target_pos[i]+g_coord_mgr.work_offsets[idx][i];
+                machine_start_pos[i]=start_pos[i]+g_coord_mgr.work_offsets[idx][i];
+            }
+        }
 
 
         if(is_G02||is_G03){
-            generate_arc_trajectory(start_pos,
-                                    target_pos,
+            generate_arc_trajectory(machine_start_pos,
+                                    machine_target_pos,
                                     offset_i, offset_j,
                                     is_G02, run_speed_mm);
             // 圆弧命令处理后直接返回，当前状态更新在插补完成后由规划器同步光标时完成
@@ -97,7 +110,7 @@ int parse_gcode_line(const char *gcode_line)
             double speed_mm_sec=run_speed_mm/60.0;
 
             
-            api_push_trajectory(target_pos,speed_mm_sec,DEFAULT_ACC,DEFAULT_DEC);
+            api_push_trajectory(machine_target_pos,speed_mm_sec,DEFAULT_ACC,DEFAULT_DEC);
 
         }
 

@@ -83,6 +83,9 @@ void SMC_ResumeProcessing(void);
 // 紧急中止 (Abort)
 void SMC_AbortProcessing(void);
 
+// 配置轴的脉冲/单位 (例如 脉冲/mm 或 脉冲/度)，用于位置/速度换算
+void SMC_ConfigPulsePerUnit(int axis_idx,double pulse_per_unit);
+
 
 #ifdef __cplusplus
 }

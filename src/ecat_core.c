@@ -285,41 +285,7 @@ OSAL_THREAD_FUNC_RT ecat_thread_rt(void *arg)
                         s = g_interpolator.total_distance;
                         g_interpolator.is_moving = 0; // 一段轨迹彻底走完
                     }
-
-                    /*g_interpolator.current_time_ms++;
-
-                    int32_t t=g_interpolator.current_time_ms;
-                    double s=0.0;
-
-                    double t_val=(double)t;
-                    double t1_val=(double)g_interpolator.t_acc;
-                    double t2_val=(double)(g_interpolator.t_acc+g_interpolator.t_cru);
-         
-
-                    double s_acc_phase=0.5*g_interpolator.acc*t1_val*t1_val+g_interpolator.v_start*t1_val;
-                    double v_acc_phase=g_interpolator.acc*t1_val+g_interpolator.v_start;
-                    double s_cru_phase=s_acc_phase+v_acc_phase*g_interpolator.t_cru;
-
-                    if(t<=g_interpolator.t_acc){
-                        //1.加速阶段
-                        s=0.5*g_interpolator.acc*t_val*t_val+g_interpolator.v_start*t_val;
-                    }
-                    else if(t<=(g_interpolator.t_acc+g_interpolator.t_cru)){
-                        //2.匀速阶段
-                        double dt=t_val-t1_val;
-                        //double s_acc=0.5*g_interpolator.acc*t1*t1+g_interpolator.v_start*t1;
-                        s=s_acc_phase+v_acc_phase*dt;
-                    }
-                    else if(t<=g_interpolator.total_time_ms){
-                        //3.减速阶段
-                        double dt=t_val-t2_val;
-                        //int32_t t_rem=t3-t;
-                        s=s_cru_phase+v_acc_phase*dt-0.5*g_interpolator.dec*dt*dt;
-                    
-                    }else{
-                        s=g_interpolator.total_distance;
-                        g_interpolator.is_moving=0;
-                    }*/
+           
 
                     double ratio=0;
                     if(g_interpolator.total_distance>0.000001){
@@ -333,6 +299,17 @@ OSAL_THREAD_FUNC_RT ecat_thread_rt(void *arg)
                         g_interpolator.current_pos[j]=g_interpolator.start_pos[j]+(g_interpolator.target_pos[j]-g_interpolator.start_pos[j])*ratio;
                     }
 
+                }
+                for(int j=0;j<AXIS_NUM;j++){
+                    g_coord_mgr.current_g53_pos[j]=g_interpolator.current_pos[j];
+
+
+                    if(g_coord_mgr.current_coord==COORD_G53){
+                        g_coord_mgr.current_logical_pos[j]=g_coord_mgr.current_g53_pos[j];
+                    }else{
+                        int idx=g_coord_mgr.current_coord-1;
+                        g_coord_mgr.current_logical_pos[j]=g_coord_mgr.current_g53_pos[j]-g_coord_mgr.work_offsets[idx][j];
+                    }
                 }
             }
 
