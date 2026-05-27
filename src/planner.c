@@ -3,6 +3,10 @@
 // 辅助函数：计算两个线段的夹角，返回安全过弯速度
 // 夹角越小（越平滑），过弯速度越高；夹角接近 90 度，必须减速；夹角大于 90 度，必须停下 (速度为0)
 double calculate_junction_speed(TrajectorySegment_t *prev, TrajectorySegment_t *curr) {
+    // M代码安全隔离：遇到M代码段，强行返回0，确保前序运动段彻底减速停稳
+    if (prev->cmd_type == CMD_TYPE_MCODE || curr->cmd_type == CMD_TYPE_MCODE) {
+        return 0.0;
+    }
     // 计算向量点积 (夹角余弦值 cos_theta)
     /*double cos_theta = (prev->dir_x * curr->dir_x) + 
                        (prev->dir_y * curr->dir_y) + 

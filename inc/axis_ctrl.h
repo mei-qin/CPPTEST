@@ -49,6 +49,7 @@ void api_sync_planner_cursor();
 double api_get_cursor(int axis_idx);
 int is_trajectory_finished();
 void api_push_trajectory(double target_pos[AXIS_NUM],double speed,double acc,double dec);
+void api_push_mcode(int m_code, double s_value);
 void api_push_continuous_segment(double val_x,double val_y,double val_z,double speed_sec);
 void api_flush_planner();
 void api_motion_pause();

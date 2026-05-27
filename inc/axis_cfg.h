@@ -86,6 +86,12 @@ typedef uint16_t uint16;
 #define MAX_SLAVES_PER_AXIS 2
 #define QUEUE_SIZE 1024 // 命令队列大小
 
+/************************ 命令类型宏 ************************/
+#define CMD_TYPE_MOTION  0   // 运动段（G00/G01/G02/G03）
+#define CMD_TYPE_MCODE   1   // M代码段（辅助功能）
+
+#define MCODE_WAIT_TIMEOUT_MS  5000  // M代码等待绝对超时（ms），防止队列死锁
+
 
 /************************ 轴参数结构体（单轴所有参数独立封装） ************************/
 // 每个轴的独立配置/状态，五轴通过数组管理
@@ -184,6 +190,10 @@ typedef struct{
     double acc;
     double dec;
 
+    int is_waiting_mcode;       // M代码等待屏障标志
+    int32_t mcode_wait_timer;   // M代码非阻塞延时计数器（ms）
+    int current_mcode;          // 当前等待中的M代码编号
+
 }Interpolator_t;
 
 /*
@@ -201,6 +211,10 @@ typedef struct{
     double target_pos[AXIS_NUM];
     volatile int is_ready;
     int32_t speed;
+
+    int cmd_type;       // CMD_TYPE_MOTION 或 CMD_TYPE_MCODE
+    int m_code;         // M代码编号（如 3=M03, 5=M05）
+    double s_value;     // S值（如主轴转速）
 
     double total_distance;
     double dir_vec[AXIS_NUM];

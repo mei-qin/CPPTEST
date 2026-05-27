@@ -142,6 +142,9 @@ void api_push_trajectory(double target_pos[AXIS_NUM],
     TrajectorySegment_t *seg = &g_cmd_queue.buffer[g_cmd_queue.head];
 
     seg->is_ready = 0; // 标记为未准备好，等待 Planner 计算完成后设置为1
+    seg->cmd_type = CMD_TYPE_MOTION;
+    seg->m_code = 0;
+    seg->s_value = 0.0;
 
     double delta[AXIS_NUM];
     for(int i=0;i<AXIS_NUM;i++){
@@ -186,10 +189,36 @@ void api_push_trajectory(double target_pos[AXIS_NUM],
     g_cmd_queue.head = next_head; 
     
     // 每次进队，瞬间重算整个队列的速度前瞻！
-    planner_recalculate(); 
+    planner_recalculate();
 }
 
 
+void api_push_mcode(int m_code, double s_value)
+{
+    int next_head = (g_cmd_queue.head + 1) % QUEUE_SIZE;
+    while (next_head == g_cmd_queue.tail) { osal_usleep(1000); }
+
+    TrajectorySegment_t *seg = &g_cmd_queue.buffer[g_cmd_queue.head];
+    memset(seg, 0, sizeof(TrajectorySegment_t));
+
+    seg->cmd_type      = CMD_TYPE_MCODE;
+    seg->m_code        = m_code;
+    seg->s_value       = s_value;
+    seg->is_ready      = 0;
+    seg->total_distance = 0.0;
+    seg->v_target      = 0.0;
+    seg->v_start       = 0.0;
+    seg->v_end         = 0.0;
+    seg->acc           = 0.0;
+    seg->dec           = 0.0;
+    seg->t_total       = 0;
+    seg->t_acc         = 0;
+    seg->t_dec         = 0;
+    seg->t_cru         = 0;
+
+    g_cmd_queue.head = next_head;
+    planner_recalculate();
+}
 
 
 int is_trajectory_finished(){

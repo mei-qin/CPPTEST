@@ -187,12 +187,21 @@ OSAL_THREAD_FUNC_RT ecat_thread_rt(void *arg)
             if(g_all_axis_op_ready){
 
 
-                if(g_interpolator.is_moving==0&&g_cmd_queue.head!=g_cmd_queue.tail){
+                if(g_interpolator.is_moving==0&&g_interpolator.is_waiting_mcode==0&&g_cmd_queue.head!=g_cmd_queue.tail){
 
                     TrajectorySegment_t seg=g_cmd_queue.buffer[g_cmd_queue.tail];
 
                     if(g_cmd_queue.buffer[g_cmd_queue.tail].is_ready==1){
                         g_cmd_queue.tail=(g_cmd_queue.tail+1)%QUEUE_SIZE;
+
+                        // M代码段：置屏障，不加载到插补器
+                        if(seg.cmd_type==CMD_TYPE_MCODE){
+                            g_interpolator.is_waiting_mcode=1;
+                            g_interpolator.mcode_wait_timer=0;
+                            g_interpolator.current_mcode=seg.m_code;
+                            // 注意：实时线程禁止printf，日志由非实时线程或环形缓冲处理
+                            continue;
+                        }
 
                         for(int j=0;j<AXIS_NUM;j++){
                             g_interpolator.start_pos[j]=g_interpolator.current_pos[j];
@@ -222,6 +231,23 @@ OSAL_THREAD_FUNC_RT ecat_thread_rt(void *arg)
                     }
                 }
 
+
+                // 非阻塞M代码等待逻辑（每ms周期递增计数器，无sleep）
+                if(g_interpolator.is_waiting_mcode){
+                    g_interpolator.mcode_wait_timer++;
+                    int wait_target_ms;
+                    switch(g_interpolator.current_mcode){
+                        case 3:  wait_target_ms=2000; break; // M03 主轴正转
+                        case 5:  wait_target_ms=1000; break; // M05 主轴停止
+                        default: wait_target_ms=1000; break; // 其他M代码默认1000ms
+                    }
+                    // 正常到达目标延时，或绝对超时兜底防死锁
+                    if(g_interpolator.mcode_wait_timer >= wait_target_ms ||
+                       g_interpolator.mcode_wait_timer >= MCODE_WAIT_TIMEOUT_MS){
+                        g_interpolator.is_waiting_mcode=0;
+                        g_interpolator.mcode_wait_timer=0;
+                    }
+                }
 
                 if(g_interpolator.is_moving){
 
@@ -414,6 +440,9 @@ OSAL_THREAD_FUNC_RT ecat_thread_rt(void *arg)
         
             
         }else{
+            // 系统停止/异常分支：重置M代码屏障防止标志位残留
+            g_interpolator.is_waiting_mcode=0;
+            g_interpolator.mcode_wait_timer=0;
             for(int i=0;i<AXIS_NUM;i++){
                for(int s=0;s<g_axis[i].slave_count;s++){
                 int slave_id=g_axis[i].slave_ids[s];
