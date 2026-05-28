@@ -22,24 +22,15 @@ static void wait_cmd_accepted(){
        osal_usleep(1000);
     }  
 }
-static int check_soft_limits(double target_x,double target_y,double target_z){
-    // Implementation for soft limit checking
-    if(g_axis[AXIS_X].enable_soft_limit){
-        if(target_x>g_axis[AXIS_X].soft_limit_pos||target_x<g_axis[AXIS_X].soft_limit_neg){
-            printf("[软限位] X轴目标位置%.2f超出软限位范围！\n", target_x);
-            return 0;
-        }
-    }
-    if(g_axis[AXIS_Y].enable_soft_limit){
-        if(target_y>g_axis[AXIS_Y].soft_limit_pos||target_y<g_axis[AXIS_Y].soft_limit_neg){
-            printf("[软限位] Y轴目标位置%.2f超出软限位范围！\n", target_y);
-            return 0;
-        }
-    }
-    if(g_axis[AXIS_Z].enable_soft_limit){
-        if(target_z>g_axis[AXIS_Z].soft_limit_pos||target_z<g_axis[AXIS_Z].soft_limit_neg){
-            printf("[软限位] Z轴目标位置%.2f超出软限位范围！\n", target_z);
-            return 0;
+static int check_soft_limits(double target_pos[AXIS_NUM]){
+    for(int i=0;i<AXIS_NUM;i++){
+        if(g_axis[i].enable_soft_limit){
+            if(target_pos[i]>g_axis[i].soft_limit_pos||target_pos[i]<g_axis[i].soft_limit_neg){
+                printf("[软限位] %s 目标位置%.2f 超出范围 [%.2f, %.2f]\n",
+                       g_axis[i].axis_name, target_pos[i],
+                       g_axis[i].soft_limit_neg, g_axis[i].soft_limit_pos);
+                return 0;
+            }
         }
     }
     return 1;
@@ -132,9 +123,11 @@ void api_move_relative(int axis_idx,double distance,double speed){
 }
 
 
-void api_push_trajectory(double target_pos[AXIS_NUM], 
-                         double speed_sec_mm, double acc_sec_mm, double dec_sec_mm) 
+void api_push_trajectory(double target_pos[AXIS_NUM],
+                         double speed_sec_mm, double acc_sec_mm, double dec_sec_mm)
 {
+    if(!check_soft_limits(target_pos)) return;
+
     int next_head = (g_cmd_queue.head + 1) % QUEUE_SIZE;
     while (next_head == g_cmd_queue.tail) { osal_usleep(1000); } 
 
@@ -222,7 +215,9 @@ void api_push_mcode(int m_code, double s_value)
 
 
 int is_trajectory_finished(){
-    if(g_cmd_queue.head==g_cmd_queue.tail&&g_interpolator.is_moving==0){
+    if(g_cmd_queue.head==g_cmd_queue.tail
+       && g_interpolator.is_moving==0
+       && g_interpolator.is_waiting_mcode==0){
         return 1;
     }
     return 0;

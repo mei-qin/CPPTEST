@@ -92,6 +92,21 @@ typedef uint16_t uint16;
 
 #define MCODE_WAIT_TIMEOUT_MS  5000  // M代码等待绝对超时（ms），防止队列死锁
 
+/************************ 跟随误差监控参数 ************************/
+#define FOLLOW_ERR_MAX_PULSE     5000   // 跟随误差硬限（脉冲），超过立即停机
+#define FOLLOW_ERR_WARN_PULSE    2000   // 跟随误差警告阈值（脉冲）
+#define FOLLOW_ERR_WARN_TIME_MS  200    // 警告阈值持续时长（ms），超过则停机
+
+/************************ 实时线程环形日志缓冲 ************************/
+#define RT_LOG_BUF_SIZE  64
+#define RT_LOG_MSG_LEN   128
+
+typedef struct {
+    char buffer[RT_LOG_BUF_SIZE][RT_LOG_MSG_LEN];
+    volatile int head;
+    volatile int tail;
+} RtLog_t;
+
 
 /************************ 轴参数结构体（单轴所有参数独立封装） ************************/
 // 每个轴的独立配置/状态，五轴通过数组管理
@@ -134,6 +149,8 @@ typedef struct {
     int32_t sync_max_err_pulse;   // 同步最大误差（脉冲），超过则判定为同步故障
     int sync_err_time_ms;       // 同步误差持续时间（ms），超过则判定为同步故障
     int _current_sync_timer;    // 同步误差计时器（ms），用于跟踪同步异常持续时间
+
+    int32_t _follow_err_timer;  // 跟随误差警告持续时间计时器（ms）
     
 } AxisCtrl_t;
 
