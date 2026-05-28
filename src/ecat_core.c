@@ -383,30 +383,28 @@ OSAL_THREAD_FUNC_RT ecat_thread_rt(void *arg)
                     case 3:
                     output_cw=CW_ENABLE_OP;
 
-                    // 使能完成首个周期：强制对齐命令位置到实际位置，消除坐标系偏移
+            
                     if(g_axis[i].cia_step_delay==0){
-                        int32_t raw_pulse=axis_pdo_read_pos(g_axis[i].slave_ids[0])-g_axis[i].home_offset[0];
-                        g_axis[i].current_cmd_pos=(double)raw_pulse/g_axis[i].pulse_per_unit;
-                        g_interpolator.current_pos[i]=g_axis[i].current_cmd_pos;
-                        g_axis[i].cia_step_delay=1; // 标记已对齐，后续周期不再执行
+                        int64_t primary_pulse = (int64_t)axis_pdo_read_pos(g_axis[i].slave_ids[0]) 
+                                              - (int64_t)g_axis[i].home_offset[0];
+                        
+                        g_axis[i].current_cmd_pos = (double)primary_pulse / g_axis[i].pulse_per_unit;
+                        g_interpolator.current_pos[i] = g_axis[i].current_cmd_pos;
+                        g_axis[i].cia_step_delay = 1;
                     }else{
                         g_axis[i].current_cmd_pos=g_interpolator.current_pos[i];
                     }
 
-                    // 跟随误差监控：比较命令位置与实际位置
+                    // 跟随误差监控：直接从驱动器 TxPDO 0x60F4 读取（驱动器自身计算，无坐标系偏移风险）
                     {
-                        int64_t cmd_pulse=(int64_t)round(g_axis[i].current_cmd_pos*g_axis[i].pulse_per_unit);
-                        int64_t act_pulse=(int64_t)axis_pdo_read_pos(g_axis[i].slave_ids[0])-(int64_t)g_axis[i].home_offset[0];
-                        int64_t follow_err=cmd_pulse-act_pulse;
-                        if(follow_err<0) follow_err=-follow_err;
-                        if(follow_err>FOLLOW_ERR_MAX_PULSE){
-                            rt_log("[跟随误差] %s 硬限超差 %lld 脉冲",g_axis[i].axis_name,(long long)follow_err);
-                            // 冻结插补器：所有轴钳制在当前位置，禁止继续运动
+                        int32_t follow_err=axis_pdo_read_follow_err(g_axis[i].slave_ids[0]);
+                        int32_t abs_err=follow_err<0?-follow_err:follow_err;
+                        if(abs_err>FOLLOW_ERR_MAX_PULSE){
+                            rt_log("[跟随误差] %s 硬限超差 %d 脉冲",g_axis[i].axis_name,abs_err);
                             g_interpolator.is_moving=0;
                             g_interpolator.is_waiting_mcode=0;
                             dorun=0;
-                            // 不跳过 PDO！本周期正常发送当前位置，保证所有轴收到指令
-                        }else if(follow_err>FOLLOW_ERR_WARN_PULSE){
+                        }else if(abs_err>FOLLOW_ERR_WARN_PULSE){
                             g_axis[i]._follow_err_timer++;
                             if(g_axis[i]._follow_err_timer>=FOLLOW_ERR_WARN_TIME_MS){
                                 rt_log("[跟随误差] %s 警告持续 %dms",g_axis[i].axis_name,g_axis[i]._follow_err_timer);
@@ -505,6 +503,49 @@ void ecat_bringup(char *ifname)
     }
     printf("[ECAT] 扫描到%d个EtherCAT从站\n", ctx.slavecount);
 
+    // TxPDO 重映射：添加 0x60F4 跟随误差到 PDO 输入（必须在 config_map_group 之前）
+    for(int i=0;i<AXIS_NUM;i++){
+        for(int s=0;s<g_axis[i].slave_count;s++){
+            uint16_t slave=g_axis[i].slave_ids[s];
+            if(slave==0) continue;
+
+            // 切到 PRE-OP 才能改 PDO 映射
+            ctx.slavelist[slave].state=EC_STATE_PRE_OP;
+            ecx_writestate(&ctx,slave);
+            ecx_statecheck(&ctx,slave,EC_STATE_PRE_OP,EC_TIMEOUTSTATE);
+
+            // 禁用 TxPDO 分配
+            uint8_t zero=0;
+            ecx_SDOwrite(&ctx,slave,0x1C13,0x00,FALSE,1,&zero,EC_TIMEOUTRXM);
+
+            // 清空映射对象 0x1A00
+            ecx_SDOwrite(&ctx,slave,0x1A00,0x00,FALSE,1,&zero,EC_TIMEOUTRXM);
+
+            // 写入三条映射：状态字(16bit) + 实际位置(32bit) + 跟随误差(32bit)
+            uint32_t map_sw   =0x60410010;
+            uint32_t map_pos  =0x60640020;
+            uint32_t map_ferr =0x60F40020;
+            ecx_SDOwrite(&ctx,slave,0x1A00,0x01,FALSE,4,&map_sw,EC_TIMEOUTRXM);
+            ecx_SDOwrite(&ctx,slave,0x1A00,0x02,FALSE,4,&map_pos,EC_TIMEOUTRXM);
+            ecx_SDOwrite(&ctx,slave,0x1A00,0x03,FALSE,4,&map_ferr,EC_TIMEOUTRXM);
+
+            // 设置映射条目数
+            uint8_t map_cnt=3;
+            ecx_SDOwrite(&ctx,slave,0x1A00,0x00,FALSE,1,&map_cnt,EC_TIMEOUTRXM);
+
+            // 绑定到 TxPDO 分配
+            uint16_t pdo_idx=0x1A00;
+            ecx_SDOwrite(&ctx,slave,0x1C13,0x01,FALSE,2,&pdo_idx,EC_TIMEOUTRXM);
+
+            // 启用 TxPDO 分配
+            uint8_t one=1;
+            ecx_SDOwrite(&ctx,slave,0x1C13,0x00,FALSE,1,&one,EC_TIMEOUTRXM);
+
+            printf("[PDO] 从站%d TxPDO: 0x6041+0x6064+0x60F4\n", slave);
+        }
+    }
+
+    // SOEM 读取更新后的 PDO 映射，自动分配 IOmap 偏移
     ecx_config_map_group(&ctx, IOmap, 0);
     ecx_configdc(&ctx);
 

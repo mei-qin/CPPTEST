@@ -1,0 +1,176 @@
+================================================================
+  CNC 五轴数控系统 — 代码开发总结报告
+  分支: CNC_V1
+  生成时间: 2026-05-28
+================================================================
+
+一、提交历史 (从初始到最新)
+================================================================
+
+a978ed4  init: 初始化CPPTEST项目，添加核心源码和配置文件
+9a5cf17  feat: Implement G-code parser and trajectory planner
+fbaaaf3  g53&g54
+b524337  docs: 添加 CLAUDE.md AI 助手指南文件
+5433d98  feat: 添加 M 代码解析与实时线程同步屏障机制
+a0a6abe  feat: 升级 planner 为 G64 向心加速度过弯模型并加固数学安全
+ebf3d98  feat: Phase 1 安全闭环 — 软限位接入、跟随误差监控、RT日志缓冲
+
+二、功能增量总览
+================================================================
+
+【commit 5433d98】M 代码解析与实时线程同步屏障
+----------------------------------------------------------------
+涉及文件: axis_cfg.h, axis_ctrl.h, axis_ctrl.c, ecat_core.c,
+          gcode_parser.c, planner.c
+
+1. M 代码解析 (gcode_parser.c)
+   - parse_gcode_line 新增 M/S 字母识别 (case 'M', case 'S')
+   - 解析到 M 代码时调用 api_push_mcode 推入命令队列
+   - 支持的格式示例: M03 S1000 (主轴正转, 转速1000)
+
+2. 命令队列扩展 (axis_cfg.h)
+   - 新增宏 CMD_TYPE_MOTION=0, CMD_TYPE_MCODE=1
+   - 新增宏 MCODE_WAIT_TIMEOUT_MS=5000 (绝对超时防死锁)
+   - TrajectorySegment_t 新增字段: cmd_type, m_code, s_value
+   - Interpolator_t 新增字段: is_waiting_mcode, mcode_wait_timer,
+     current_mcode
+
+3. M 代码压入 API (axis_ctrl.c)
+   - api_push_mcode(m_code, s_value): 所有运动参数置零，
+     仅填充 cmd_type=CMD_TYPE_MCODE，触发 planner_recalculate()
+
+4. 前瞻安全隔离 (planner.c)
+   - calculate_junction_speed: 遇 CMD_TYPE_MCODE 段返回 0.0，
+     强制前序运动段彻底减速停稳后再执行 M 代码
+
+5. 实时线程同步屏障 (ecat_core.c)
+   - 队列弹出条件增加 is_waiting_mcode==0
+   - M 代码段弹出后置 is_waiting_mcode=1, 不加载到插补器
+   - 非阻塞等待: 每 1ms 周期递增 mcode_wait_timer
+     M03(主轴正转)=2000ms, M05(主轴停止)=1000ms, 其他=1000ms
+   - 绝对超时 MCODE_WAIT_TIMEOUT_MS=5000ms 兜底
+   - dorun=0 异常分支重置 is_waiting_mcode 标志
+
+
+【commit a0a6abe】G64 向心加速度过弯模型 + planner 数学安全加固
+----------------------------------------------------------------
+涉及文件: planner.c
+
+1. calculate_junction_speed 完全重写 — G64 容差平滑模型
+   - 旧算法: v = v_min * cos_theta (线性降速, 90度强制归零)
+   - 新算法: 基于容差 TOLERANCE=0.05mm + 向心加速度极限 500mm/s^2
+     计算等效转弯半径 R = TOLERANCE / (1-cos(alpha/2))
+     安全过弯速度 v_allow = sqrt(MAX_CENTRIPETAL_ACC * R)
+     返回 min(v_allow, prev->v_max, curr->v_max)
+   - 90度直角: R~0.12mm, v_allow~7.7mm/s (不再归零, 机床不卡顿)
+   - cos_theta >= 0.999: 全速通过
+   - cos_theta <= -0.999: 折返停稳
+   - denom 防除零保护 (<=1e-6)
+
+2. planner_recalculate 全面安全加固
+   a. 消灭野数据: 反向扫描前遍历 is_ready==0 的段,
+      强制 v_start/v_end = 0.0
+   b. 消灭 pow(x,2): 全部替换为 x*x 高效乘法
+   c. sqrt 防负钳制: 所有 sqrt 入参加 if(inner<0) inner=0
+     (反向扫描、正向扫描、三角形退化, 共 3 处)
+   d. 除零保护: a = fmax(seg->acc, 1e-6), d = fmax(seg->dec, 1e-6)
+   e. t_cru 除零: if(v_m > 1e-6) 保护分支
+   f. M 代码/零距离跳过: 时间重构头部 continue, t_total=1
+   g. safe_tail 边界修复: (tail+2)->(tail+1), count==3 时
+      反向扫描正确执行 1 次迭代
+
+
+【commit ebf3d98】Phase 1 安全闭环
+----------------------------------------------------------------
+涉及文件: axis_cfg.h, global_def.h, axis_ctrl.c, ecat_core.c
+
+1. is_trajectory_finished 修复
+   - 新增 is_waiting_mcode==0 判断, 防止 M 代码等待期间
+     误报"运动已完成"
+
+2. 软限位泛化 + 接入运动管道
+   - check_soft_limits 从硬编码 XYZ 改为 AXIS_NUM 泛化循环
+   - api_push_trajectory 入队前调用, 越限则拒绝入队
+   - 打印越限轴名和范围信息
+
+3. RT 线程跟随误差监控
+   - axis_cfg.h 新增: FOLLOW_ERR_MAX_PULSE=5000 (硬限)
+     FOLLOW_ERR_WARN_PULSE=2000 (警告)
+     FOLLOW_ERR_WARN_TIME_MS=200 (警告持续时长)
+   - AxisCtrl_t 新增: _follow_err_timer 计时器
+   - RT 线程 case 3 分支每周期计算:
+     cmd_pulse vs act_pulse 差值 (int64_t 安全计算)
+   - 使能首周期强制对齐: cia_step_delay==0 时
+     cmd_pulse = act_pulse, 消除坐标系偏移
+   - 硬限超差: 冻结插补器 (is_moving=0) + dorun=0
+     但本周期所有轴正常发送当前位置, PDO 永不截断
+   - 警告超差: 累积计时器, 持续超限后停机
+   - dorun=0 异常分支重置所有轴 _follow_err_timer
+
+4. RT 线程环形日志缓冲
+   - axis_cfg.h 新增 RtLog_t 结构体 (64条 x 128字节)
+   - global_def.h 声明 g_rt_log 全局实例
+   - rt_log(): vsnprintf 写入 + __sync_synchronize 写屏障
+     + 更新 head (缓冲满则丢弃)
+   - rt_log_drain(): 读屏障 + printf + 写屏障, 完整对称
+   - RT 线程 5 处 printf 全部替换为 rt_log:
+     * FIFO 调度设置
+     * RT 线程初始化完成
+     * 龙门同步异常
+     * 龙门同步报警
+     * 无效轨迹段
+   - ecat_thread_chk 每 10ms 调用 rt_log_drain 异步输出
+
+
+三、当前系统架构总览
+================================================================
+
+文件结构:
+  inc/axis_cfg.h      — 数据结构、宏定义、硬件常量
+  inc/axis_ctrl.h     — 轴控制 API 声明
+  inc/ecat_core.h     — EtherCAT 核心函数声明
+  inc/gcode_parser.h  — G 代码解析器声明
+  inc/global_def.h    — 全局变量 extern 声明
+  inc/planner.h       — 前瞻规划器声明
+  inc/smc_api.h       — 上层用户 API 声明
+
+  src/main.c          — 主程序入口 + 交互式控制台
+  src/axis_ctrl.c     — 轴控制 API 实现 + 运动命令队列
+  src/ecat_core.c     — EtherCAT 实时线程 + 故障检查
+  src/gcode_parser.c  — G 代码解析 + 圆弧插补
+  src/planner.c       — G64 前瞻速度规划器
+  src/smc_api.c       — 用户层 API 封装
+
+线程模型:
+  ecat_thread_rt      — 1ms 实时线程, SCHED_FIFO 优先级99
+    (CSP 位置命令下发, 插补运算, 跟随误差监控, 龙门同步检测)
+  ecat_thread_chk     — 10ms 非实时线程
+    (从站状态检测, RT 日志异步输出)
+  parser_thread_func  — 非实时解析线程
+    (G 代码文件逐行解析, 推入命令队列)
+
+数据流:
+  G代码文件 -> parse_gcode_line -> api_push_trajectory/api_push_mcode
+    -> CommandQueue_t -> planner_recalculate -> is_ready=1
+    -> ecat_thread_rt 弹出段 -> Interpolator_t 梯形/S曲线插补
+    -> 各轴 current_cmd_pos -> PDO 写入 -> 驱动器
+
+
+四、已知限制与后续计划
+================================================================
+
+Phase 2 (通用化架构):
+  - 每轴独立 max_speed/max_acc/axis_type 配置 (线性/旋转)
+  - G64 参数运行时可配 (SMC_ConfigPlannerParams)
+  - 距离/速度计算区分线性轴和旋转轴
+  - G17/G18/G19 平面选择
+
+Phase 3 (生产级加固):
+  - 单轴故障隔离 (当前 dorun=0 全轴停机)
+  - G28/G93 等模态扩展
+  - 故障记录与恢复流程
+  - 驱动器对象字典 0x60F4 跟随误差直接映射
+
+================================================================
+  报告结束
+================================================================

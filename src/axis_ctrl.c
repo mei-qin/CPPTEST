@@ -731,6 +731,24 @@ int32 axis_pdo_read_pos(int slave_id)
     return actual_pos;
 }
 
+/************************ 从PDO读取跟随误差 (0x60F4) ************************/
+int32_t axis_pdo_read_follow_err(int slave_id)
+{
+    if (slave_id <=0 || slave_id > ctx.slavecount) return 0;
+
+    uint8 *in = ctx.slavelist[slave_id].inputs;
+    if (!in) return 0;
+
+    int32_t follow_err = (int32_t)(
+        in[PDO_FOLLOW_BYTE0] |
+        (in[PDO_FOLLOW_BYTE1] << 8) |
+        (in[PDO_FOLLOW_BYTE2] << 16) |
+        (in[PDO_FOLLOW_BYTE3] << 24)
+    );
+
+    return follow_err;
+}
+
 /************************ 执行原点复归 (Homing) ************************/
 void axis_homing(int axis_idx)
 {

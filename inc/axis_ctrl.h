@@ -35,6 +35,7 @@ void diagnose_sync_failure(int axis_idx);
 void axis_read_txpdo(int axis_idx);
 
 int32 axis_pdo_read_pos(int slave_id);
+int32_t axis_pdo_read_follow_err(int slave_id);
 void axis_homing(int axis_idx);
 
 void api_set_zero(int axis_idx);

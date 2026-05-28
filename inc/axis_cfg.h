@@ -36,6 +36,10 @@ typedef uint16_t uint16;
 #define PDO_POS_BYTE3    5
 #define PDO_SW_BYTE0     0
 #define PDO_SW_BYTE1     1
+#define PDO_FOLLOW_BYTE0 6   // 0x60F4 跟随误差（32位，小端）
+#define PDO_FOLLOW_BYTE1 7
+#define PDO_FOLLOW_BYTE2 8
+#define PDO_FOLLOW_BYTE3 9
 
 // 补全所有未定义的对象字典标识符
 #define OD6060_MODE_OF_OPERATION 0x6060  // 操作模式
