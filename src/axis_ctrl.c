@@ -15,6 +15,8 @@ Interpolator_t g_interpolator={0};
 CommandQueue_t g_cmd_queue={0};
 static double plan_cursor[AXIS_NUM]={0};
 CoordManager_t g_coord_mgr={COORD_G54,{0},{0},{0}};
+PlannerConfig_t g_planner_config={0.05, 500.0};
+pthread_mutex_t planner_mutex;
 /************************ 五轴系统初始化（核心配置，修改此函数即可调整轴参数） ************************/
 static void wait_cmd_accepted(){
     while (g_ui_cmd.execute==1)
@@ -128,68 +130,158 @@ void api_push_trajectory(double target_pos[AXIS_NUM],
 {
     if(!check_soft_limits(target_pos)) return;
 
+    // 拦截负速度/零速度：进给速度是标量，非正数属于上层逻辑错误
+    if(speed_sec_mm <= 0.0) {
+        printf("[SAFETY] 进给速度 %.3f mm/s 非正数，拒绝执行！\n", speed_sec_mm);
+        return;
+    }
+
+    // ---- 第一步：计算原始偏差（mm 或 deg）----
+    double delta_raw[AXIS_NUM];
+    for(int i=0;i<AXIS_NUM;i++){
+        delta_raw[i]=target_pos[i]-plan_cursor[i];
+    }
+
+    // Pre-check: 拦截未配置动力学的轴（max_speed==0 表示未初始化）
+    for(int i=0;i<AXIS_NUM;i++){
+        if(fabs(delta_raw[i]) > 0.0001 && g_axis[i].max_speed <= 0.0) {
+            printf("[SAFETY] %s 轴动力学未配置(max_speed=0)，拒绝执行运动指令！\n",
+                   g_axis[i].axis_name);
+            return;
+        }
+    }
+
+    // ---- 第二步：统一量纲 → 等效毫米位移 ----
+    // equivalent_radius: 旋转轴物理半径(mm)
+    // 弧长 = deg × (π/180) × radius → mm
+    double delta_mm[AXIS_NUM];
+    for(int i=0;i<AXIS_NUM;i++){
+        if(g_axis[i].axis_type == 1){
+            if(g_axis[i].equivalent_radius <= 0.0) {
+                printf("[SAFETY] %s 旋转轴等效半径未配置(%.2f)，拒绝执行！\n",
+                       g_axis[i].axis_name, g_axis[i].equivalent_radius);
+                return;
+            }
+            delta_mm[i] = delta_raw[i] * DEG_TO_RAD * g_axis[i].equivalent_radius;
+        } else {
+            delta_mm[i] = delta_raw[i];
+        }
+    }
+
+    // ---- 第三步：空间合成距离（纯 mm）----
+    double dist_sq = 0.0;
+    for(int i=0;i<AXIS_NUM;i++){
+        dist_sq += delta_mm[i] * delta_mm[i];
+    }
+    double dist = sqrt(dist_sq);
+    if(dist < 1e-6) dist = 0.0;
+
+    // Wait for queue slot: 急停/报警时 RT 线程停止消费，必须打破死锁
     int next_head = (g_cmd_queue.head + 1) % QUEUE_SIZE;
-    while (next_head == g_cmd_queue.tail) { osal_usleep(1000); } 
+    while (next_head == g_cmd_queue.tail) {
+        if (!dorun) return;
+        osal_usleep(1000);
+        next_head = (g_cmd_queue.head + 1) % QUEUE_SIZE;
+    }
 
-    
     TrajectorySegment_t *seg = &g_cmd_queue.buffer[g_cmd_queue.head];
-
-    seg->is_ready = 0; // 标记为未准备好，等待 Planner 计算完成后设置为1
+    seg->is_ready = 0;
     seg->cmd_type = CMD_TYPE_MOTION;
     seg->m_code = 0;
     seg->s_value = 0.0;
-
-    double delta[AXIS_NUM];
-    for(int i=0;i<AXIS_NUM;i++){
-        delta[i]=target_pos[i]-plan_cursor[i];
-    }
-    double xyz_dist=0.0;
-    if(AXIS_NUM>=3){
-        xyz_dist=sqrt(delta[0]*delta[0]+delta[1]*delta[1]+delta[2]*delta[2]);
-    }
-    double ab_dist=0.0;
-    if(AXIS_NUM>=4){
-        double ab_sq_sum=delta[3]*delta[3];
-        if(AXIS_NUM>=5){
-            ab_sq_sum+=delta[4]*delta[4];
-        }
-        ab_dist=sqrt(ab_sq_sum);
-    }
-   
-
-    double dist=(xyz_dist>0.0001)?xyz_dist:ab_dist;
     seg->total_distance = dist;
- 
-    
+
+    // ---- 第四步：纯净几何空间方向向量（无量纲）----
     for(int i=0;i<AXIS_NUM;i++){
         seg->target_pos[i]=target_pos[i];
-        if(dist>0.0001){
-            seg->dir_vec[i]=delta[i]/dist;
+        if(dist > 1e-6){
+            seg->dir_vec[i] = delta_mm[i] / dist;
         }else{
-            seg->dir_vec[i]=0;
+            seg->dir_vec[i] = 0;
         }
-        plan_cursor[i]=target_pos[i];
     }
 
-    // 基础动力学赋值
+    // ---- 第五步：短板效应限幅（量纲纯净 ratio 缩放）----
+    // axis_ratio_mm = |delta_mm[i]|/dist: 纯空间无量纲投影比
+    // 空间分配速度 req_v_mm = v × axis_ratio_mm (mm/s)
+    // 旋转轴逆解: req_v = req_v_mm / equivalent_radius → deg/s
+    // 线性轴直取: req_v = req_v_mm → mm/s
+    double final_speed_ratio = 1.0;
+    double final_acc_ratio   = 1.0;
+    double final_dec_ratio   = 1.0;
+
+    for(int i = 0; i < AXIS_NUM; i++){
+        if(fabs(delta_mm[i]) < 0.0001 || dist < 1e-6) continue;
+
+        double axis_ratio_mm = fabs(delta_mm[i]) / dist;
+
+        double req_v_mm = speed_sec_mm * axis_ratio_mm;
+        double req_a_mm = acc_sec_mm   * axis_ratio_mm;
+        double req_d_mm = dec_sec_mm   * axis_ratio_mm;
+
+        double req_v, req_a, req_d;
+        if(g_axis[i].axis_type == 1 && g_axis[i].equivalent_radius > 0.0){
+            double safe_r = fmax(g_axis[i].equivalent_radius, 1e-4);
+            double conv = DEG_TO_RAD * safe_r;
+            req_v = req_v_mm / conv;
+            req_a = req_a_mm / conv;
+            req_d = req_d_mm / conv;
+        } else {
+            req_v = req_v_mm;
+            req_a = req_a_mm;
+            req_d = req_d_mm;
+        }
+
+        if(g_axis[i].max_speed > 0.0 && req_v > g_axis[i].max_speed){
+            double r = g_axis[i].max_speed / req_v;
+            if(r < final_speed_ratio) final_speed_ratio = r;
+        }
+        if(g_axis[i].max_acc > 0.0 && req_a > g_axis[i].max_acc){
+            double r = g_axis[i].max_acc / req_a;
+            if(r < final_acc_ratio) final_acc_ratio = r;
+        }
+        if(g_axis[i].max_dec > 0.0 && req_d > g_axis[i].max_dec){
+            double r = g_axis[i].max_dec / req_d;
+            if(r < final_dec_ratio) final_dec_ratio = r;
+        }
+    }
+
+    // 短板限幅：物理防爆墙，限幅后无论多小都必须服从，绝不允许再抬高！
+    speed_sec_mm *= final_speed_ratio;
+    acc_sec_mm   *= final_acc_ratio;
+    dec_sec_mm   *= final_dec_ratio;
+
+    // 数学安全下限（限幅之后，仅防除零/NaN；规划器内部有 fmax(x,1e-6) 二次兜底）
+    if(speed_sec_mm < 1e-6) speed_sec_mm = 1e-6;
+    if(acc_sec_mm < 1e-6)   acc_sec_mm   = 1e-6;
+    if(dec_sec_mm < 1e-6)   dec_sec_mm   = 1e-6;
+
+    // 单位转换: mm/s → mm/ms, mm/s^2 → mm/ms^2
     seg->v_target = speed_sec_mm / 1000.0;
     seg->acc = acc_sec_mm / 1000000.0;
     seg->dec = dec_sec_mm / 1000000.0;
-    seg->v_start = 0.0; // 默认初始化，交给 Planner 重新计算！
+    seg->v_start = 0.0;
     seg->v_end = 0.0;
-    seg->v_max=seg->v_target; // 初始最高速等于目标速度，Planner会根据前瞻调整
-    
-    g_cmd_queue.head = next_head; 
-    
-    // 每次进队，瞬间重算整个队列的速度前瞻！
-    planner_recalculate();
+    seg->v_max = seg->v_target;
+
+    // 所有安全检查通过，方可推进光标
+    for(int i=0;i<AXIS_NUM;i++){
+        plan_cursor[i]=target_pos[i];
+    }
+
+    g_cmd_queue.head = next_head;
+    planner_recalculate(0);
 }
 
 
 void api_push_mcode(int m_code, double s_value)
 {
     int next_head = (g_cmd_queue.head + 1) % QUEUE_SIZE;
-    while (next_head == g_cmd_queue.tail) { osal_usleep(1000); }
+    while (next_head == g_cmd_queue.tail) {
+        if (!dorun) return;
+        osal_usleep(1000);
+        next_head = (g_cmd_queue.head + 1) % QUEUE_SIZE;
+    }
 
     TrajectorySegment_t *seg = &g_cmd_queue.buffer[g_cmd_queue.head];
     memset(seg, 0, sizeof(TrajectorySegment_t));
@@ -210,7 +302,7 @@ void api_push_mcode(int m_code, double s_value)
     seg->t_cru         = 0;
 
     g_cmd_queue.head = next_head;
-    planner_recalculate();
+    planner_recalculate(0);
 }
 
 
@@ -224,11 +316,13 @@ int is_trajectory_finished(){
 }
 
 void api_flush_planner(){
+    pthread_mutex_lock(&planner_mutex);
     int curr=g_cmd_queue.tail;
     while(curr!=g_cmd_queue.head){
-        g_cmd_queue.buffer[curr].is_ready=1;
+        atomic_store_explicit(&g_cmd_queue.buffer[curr].is_ready, 1, memory_order_release);
         curr=(curr+1)%QUEUE_SIZE;
     }
+    pthread_mutex_unlock(&planner_mutex);
 }
 
 void api_motion_pause(){
@@ -241,6 +335,8 @@ void api_motion_resume(){
 
 void axis_sys_init(void)
 {
+    // 0. 互斥锁初始化（必须在任何线程创建之前）
+    pthread_mutex_init(&planner_mutex, NULL);
 
     // 1. 轴数据结构初始化
     memset(g_axis,0,sizeof(g_axis));
@@ -261,6 +357,12 @@ void axis_sys_init(void)
 
     for(int i=0;i<AXIS_NUM;i++){
         g_axis[i].pulse_per_unit=10000.0; // 默认10000脉冲/单位
+        // 动力学安全默认值：防止未配置时零速死锁或无限速飞车
+        g_axis[i].max_speed = 200.0;  // mm/s
+        g_axis[i].max_acc   = 200.0;  // mm/s^2
+        g_axis[i].max_dec   = 200.0;  // mm/s^2
+        // 旋转轴等效半径默认值：用户须通过 SMC_ConfigAxisDynamics 覆盖
+        g_axis[i].equivalent_radius = 0.0; // 0.0 表示未配置，退化回原始行为
     }
 
     // 5.

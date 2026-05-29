@@ -4,6 +4,7 @@
 #include "soem/soem.h"
 #include "axis_cfg.h"
 #include "gcode_parser.h"
+#include <pthread.h>
 /************************ SOEM全局核心变量（b3_drive原有） ************************/
 extern ecx_contextt ctx;                // SOEM主站上下文
 extern uint8 IOmap[4096];               // PDO映射缓冲区（所有轴共用）
@@ -13,7 +14,9 @@ extern OSAL_THREAD_HANDLE thread_parser; // G-code解析线程句柄
 
 extern int expectedWKC;                 // SOEM期望WKC值
 extern int wkc;                         // 实际WKC值
-extern int mappingdone, dorun, inOP;    // SOEM状态标志
+extern int mappingdone;
+extern volatile int dorun;
+extern int inOP;
 extern int dowkccheck, currentgroup;    // SOEM故障检查标志
 
 /************************ 实时控制全局变量 ************************/
@@ -37,5 +40,7 @@ extern ParserControl_t g_parser_ctrl;     // 全局G-code解析控制变量
 extern double g_pulse_per_unit[AXIS_NUM]; // 每轴脉冲/单位（如mm）转换系数
 extern CoordManager_t g_coord_mgr; // 坐标系管理器
 extern RtLog_t g_rt_log;           // 实时线程环形日志缓冲
+extern PlannerConfig_t g_planner_config; // 规划器全局参数
+extern pthread_mutex_t planner_mutex;    // 规划器互斥锁（parser线程 vs 看门狗线程）
 
 #endif // GLOBAL_DEF_H

@@ -86,6 +86,13 @@ void SMC_AbortProcessing(void);
 // 配置轴的脉冲/单位 (例如 脉冲/mm 或 脉冲/度)，用于位置/速度换算
 void SMC_ConfigPulsePerUnit(int axis_idx,double pulse_per_unit);
 
+// 配置轴动力学参数（类型、最大速度、最大加减速、旋转轴等效半径）
+// equivalent_radius: 仅旋转轴有效（mm/deg），线性轴传 0.0
+int SMC_ConfigAxisDynamics(int axis_idx, int type, double max_v, double max_a, double max_d, double equivalent_radius);
+
+// 配置规划器参数（G64 拐角容差、最大向心加速度）
+int SMC_ConfigPlannerParams(double tolerance, double max_centripetal_acc);
+
 
 #ifdef __cplusplus
 }

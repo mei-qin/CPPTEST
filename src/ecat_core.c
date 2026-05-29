@@ -1,6 +1,7 @@
 #include "ecat_core.h"
 #include "global_def.h"
 #include "axis_ctrl.h"
+#include "planner.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
@@ -16,7 +17,9 @@ OSAL_THREAD_HANDLE thread_chk;
 OSAL_THREAD_HANDLE thread_parser;
 int expectedWKC;
 int wkc;
-int mappingdone = 0, dorun = 0, inOP = 0;
+int mappingdone = 0;
+volatile int dorun = 0;
+int inOP = 0;
 int dowkccheck = 0, currentgroup = 0;
 int g_all_axis_enabled = 0;
 
@@ -192,9 +195,8 @@ OSAL_THREAD_FUNC_RT ecat_thread_rt(void *arg)
 
                 if(g_interpolator.is_moving==0&&g_interpolator.is_waiting_mcode==0&&g_cmd_queue.head!=g_cmd_queue.tail){
 
-                    TrajectorySegment_t seg=g_cmd_queue.buffer[g_cmd_queue.tail];
-
-                    if(g_cmd_queue.buffer[g_cmd_queue.tail].is_ready==1){
+                    if(atomic_load_explicit(&g_cmd_queue.buffer[g_cmd_queue.tail].is_ready, memory_order_acquire)==1){
+                        TrajectorySegment_t seg=g_cmd_queue.buffer[g_cmd_queue.tail];
                         g_cmd_queue.tail=(g_cmd_queue.tail+1)%QUEUE_SIZE;
 
                         if(seg.cmd_type==CMD_TYPE_MCODE){
@@ -457,6 +459,11 @@ OSAL_THREAD_FUNC_RT ecat_thread_rt(void *arg)
 OSAL_THREAD_FUNC ecat_thread_chk(void *arg)
 {
     int slaveix;
+    // 饥饿看门狗状态
+    static volatile int last_queue_head = -1;
+    static int starvation_counter = 0;
+    #define STARVATION_THRESHOLD 5  // 5 × 10ms = 50ms 无新指令视为饥饿
+
     while (1)
     {
         if (inOP && ((dowkccheck > 2) || ctx.grouplist[currentgroup].docheckstate))
@@ -479,6 +486,29 @@ OSAL_THREAD_FUNC ecat_thread_chk(void *arg)
             }
             dowkccheck = 0;
         }
+
+        // ---- 队列饥饿看门狗 ----
+        // 仅在解析器已关闭（无新文件读入）时才允许触发强制释放
+        // 防止文件 I/O 阻塞或网络抖动导致的误强行结段
+        {
+            int count = (g_cmd_queue.head - g_cmd_queue.tail + QUEUE_SIZE) % QUEUE_SIZE;
+            if(count > 0 && count < 3 && !g_parser_ctrl.is_running) {
+                if(g_cmd_queue.head == last_queue_head) {
+                    starvation_counter++;
+                    if(starvation_counter >= STARVATION_THRESHOLD) {
+                        planner_recalculate(1);
+                        starvation_counter = 0;
+                    }
+                } else {
+                    starvation_counter = 0;
+                    last_queue_head = g_cmd_queue.head;
+                }
+            } else {
+                starvation_counter = 0;
+                last_queue_head = g_cmd_queue.head;
+            }
+        }
+
         rt_log_drain();
         osal_usleep(10000);
     }

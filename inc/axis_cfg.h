@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <string.h>
+#include <stdatomic.h>
 typedef int32_t int32;
 typedef uint16_t uint16;
 /************************ 核心宏定义 ************************/
@@ -88,7 +89,15 @@ typedef uint16_t uint16;
 #define AXIS_ALL -1
 
 #define MAX_SLAVES_PER_AXIS 2
+#define MIN_FEED_SPEED  0.5   // 合成速度下限（mm/s），低于此值钳制
+#define MIN_FEED_ACC   10.0   // 合成加速度下限（mm/s^2），防止龟速蠕动
+#define MIN_FEED_DEC   10.0   // 合成减速度下限（mm/s^2）
 #define QUEUE_SIZE 1024 // 命令队列大小
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+#define DEG_TO_RAD (M_PI / 180.0)
 
 /************************ 命令类型宏 ************************/
 #define CMD_TYPE_MOTION  0   // 运动段（G00/G01/G02/G03）
@@ -98,7 +107,7 @@ typedef uint16_t uint16;
 
 /************************ 跟随误差监控参数 ************************/
 #define FOLLOW_ERR_MAX_PULSE     5000   // 跟随误差硬限（脉冲），超过立即停机
-#define FOLLOW_ERR_WARN_PULSE    2000   // 跟随误差警告阈值（脉冲）
+#define FOLLOW_ERR_WARN_PULSE    3000   // 跟随误差警告阈值（脉冲）
 #define FOLLOW_ERR_WARN_TIME_MS  200    // 警告阈值持续时长（ms），超过则停机
 
 /************************ 实时线程环形日志缓冲 ************************/
@@ -142,6 +151,13 @@ typedef struct {
     double current_cmd_pos; // 当前命令位置（以工程单位表示，用于UI/控制）
     double pulse_per_unit; // 脉冲/单位（如 脉冲/mm 或 脉冲/度），用于位置/速度换算
 
+    // ④ 轴动力学参数（由 SMC_ConfigAxisDynamics 配置）
+    int axis_type;        // 0: 线性轴 (Linear), 1: 旋转轴 (Rotary)
+    double max_speed;     // 单轴最大允许速度 (mm/s 或 deg/s)
+    double max_acc;       // 单轴最大允许加速度 (mm/s^2 或 deg/s^2)
+    double max_dec;       // 单轴最大允许减速度 (mm/s^2 或 deg/s^2)
+    double equivalent_radius; // 旋转轴的物理半径，单位: mm (用于弧长换算: mm = deg * (PI/180) * radius)
+
     // ③  软件限位参数（可选，视驱动器支持情况而定）
     int enable_soft_limit;   // 软件限位使能（0=否，1=是）
     double soft_limit_pos;  // 软件限位位置- 正向限位
@@ -157,6 +173,14 @@ typedef struct {
     int32_t _follow_err_timer;  // 跟随误差警告持续时间计时器（ms）
     
 } AxisCtrl_t;
+
+/************************ 规划器全局参数 ************************/
+typedef struct {
+    double corner_tolerance;      // G64 拐角容差 (mm)
+    double max_centripetal_acc;   // G64 最大向心加速度 (mm/s^2)
+} PlannerConfig_t;
+
+extern PlannerConfig_t g_planner_config;
 
 
 typedef enum{
@@ -230,7 +254,7 @@ typedef struct{
 
 typedef struct{
     double target_pos[AXIS_NUM];
-    volatile int is_ready;
+    _Atomic int is_ready;
     int32_t speed;
 
     int cmd_type;       // CMD_TYPE_MOTION 或 CMD_TYPE_MCODE
