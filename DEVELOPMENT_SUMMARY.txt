@@ -1,7 +1,7 @@
 ================================================================
   CNC 五轴数控系统 — 代码开发总结报告
   分支: CNC_V1
-  生成时间: 2026-05-28
+  生成时间: 2026-05-29
 ================================================================
 
 一、提交历史 (从初始到最新)
@@ -14,6 +14,8 @@ b524337  docs: 添加 CLAUDE.md AI 助手指南文件
 5433d98  feat: 添加 M 代码解析与实时线程同步屏障机制
 a0a6abe  feat: 升级 planner 为 G64 向心加速度过弯模型并加固数学安全
 ebf3d98  feat: Phase 1 安全闭环 — 软限位接入、跟随误差监控、RT日志缓冲
+01c38e6  feat: 跟随误差改用驱动器 0x60F4 PDO 映射 + 双驱对齐修复
+9688b38  fix: N轴短板限幅+acquire-release语义修复+规划器互斥锁加固
 
 二、功能增量总览
 ================================================================
@@ -122,6 +124,102 @@ ebf3d98  feat: Phase 1 安全闭环 — 软限位接入、跟随误差监控、R
    - ecat_thread_chk 每 10ms 调用 rt_log_drain 异步输出
 
 
+【commit 01c38e6】跟随误差改用驱动器 0x60F4 PDO 映射 + 双驱对齐修复
+----------------------------------------------------------------
+涉及文件: axis_cfg.h, axis_ctrl.h, axis_ctrl.c, ecat_core.c
+
+1. TxPDO 重映射 (ecat_core.c -> ecat_bringup)
+   - 在 config_map_group 之前对所有从站执行 PDO 重映射
+   - 禁用 TxPDO 分配 (0x1C13:00=0)
+   - 清空映射对象 0x1A00, 写入三条映射:
+     * 0x60410010 — 状态字 (16bit)
+     * 0x60640020 — 实际位置 (32bit)
+     * 0x60F40020 — 跟随误差 (32bit)
+   - 绑定 0x1A00 → 0x1C13, 启用分配
+   - SOEM config_map_group 自动重新分配 IOmap 偏移
+
+2. 驱动器侧跟随误差读取 (axis_ctrl.c)
+   - 新增 axis_pdo_read_follow_err(slave_id)
+   - 从 PDO 偏移字节 6-9 读取 0x60F4 (驱动器自身计算)
+   - 消除主站坐标系偏移导致的误报/漏报风险
+
+3. 跟随误差监控重构 (ecat_core.c -> case 3)
+   - 旧方案: cmd_pulse - act_pulse 主站计算 (受坐标系偏移影响)
+   - 新方案: 直接读取驱动器 0x60F4, 单位为脉冲, 无偏移风险
+   - 数据类型从 int64_t 降为 int32_t (驱动器输出范围)
+   - 保留硬限/警告/计时器三级保护逻辑不变
+
+4. 双驱首周期对齐修复
+   - case 3 首周期对齐改为 int64_t 安全计算
+   - primary_pulse 使用 64 位中间量, 防止 32 位溢出
+
+
+【commit 9688b38】N轴短板限幅 + acquire-release语义修复 + 规划器互斥锁加固
+----------------------------------------------------------------
+涉及文件: axis_cfg.h, global_def.h, planner.h, smc_api.h,
+          axis_ctrl.c, ecat_core.c, planner.c, smmc_api.c, CLAUDE.md
+
+1. [致命Bug修复] 短板限幅被下限钳制反向击穿 (axis_ctrl.c)
+   - 旧代码: MIN_FEED 钳制在短板 ratio 乘法之前执行
+     用户下发 F0.01 → 被抬高到 0.5 → 乘 ratio → 远超预期
+   - 修复: 先执行 ratio 乘法（物理约束），后做 1e-6 兜底（数学安全）
+   - 规划器内部已有 fmax(x, 1e-6) 二次保护, 入口处仅需极小值防除零
+
+2. [致命Bug修复] RT线程 acquire-release 语义违规 (ecat_core.c)
+   - 旧代码: TrajectorySegment_t seg = buffer[tail] 在
+     atomic_load_acquire 之前执行, 违反 C11 内存模型
+   - ARM 弱序架构上可能导致数据撕裂 (半更新的 v_start/v_end)
+   - 修复: 将结构体拷贝移入 acquire 成功分支内部
+
+3. N轴向量化的短板效应限幅 (axis_ctrl.c -> api_push_trajectory 完全重写)
+   - 新增第五步: 逐轴计算空间投影比 axis_ratio_mm = |delta_mm[i]|/dist
+   - 线性轴: req_v = speed × ratio (mm/s 直取)
+   - 旋转轴: req_v = speed × ratio / (DEG_TO_RAD × eq_radius) (deg/s 逆解)
+   - 各轴与 max_speed/max_acc/max_dec 比较, 取最小 ratio 缩放全局
+   - 量纲纯净: 所有计算在 mm 空间进行, 最终转换到 mm/ms 入队
+
+4. 旋转轴等效半径量纲统一 (axis_ctrl.c)
+   - 第二步统一量纲: delta_mm = delta_deg × (PI/180) × equivalent_radius
+   - 空间距离/方向向量均在 mm 空间计算, 消除 mm+deg 混合的歧义
+   - 未配置等效半径 (<=0) 的旋转轴: 拒绝执行运动指令 (SAFETY 拦截)
+
+5. 规划器互斥锁 + plan_tail 结界 (planner.c)
+   - 新增 pthread_mutex_t planner_mutex, 保护前瞻计算原子性
+   - plan_tail 结界: 跳过所有 is_ready==1 的已释放段, 禁止覆写
+     正在被 RT 线程消费的数据
+   - plan_count < 3 衔接速度补齐:
+     * plan_count==2: 两段间 G64 拐角平滑 + 加减速距离约束 + 前驱衔接
+     * plan_count==1: 单段与已释放前驱的衔接速度计算
+   - force_flush 参数: 看门狗饥饿唤醒时强制释放所有未释放段
+   - 时间重构 NaN/Inf 熔断: isnan/isinf/t_total>INT32_MAX 时废弃段
+   - 释放策略: M代码末段前驱直接释放 (无需保留做速度平滑)
+
+6. is_ready 原子化 (axis_cfg.h, 全文件)
+   - TrajectorySegment_t.is_ready: volatile int → _Atomic int
+   - 全路径使用 C11 atomic_load/store_explicit + memory_order
+   - api_flush_planner 加入 planner_mutex 保护
+
+7. 队列等待死锁修复 (axis_ctrl.c)
+   - api_push_trajectory / api_push_mcode 的队列满等待循环
+     加入 dorun 检查, 急停/报警时 RT 线程停止消费可打破死锁
+
+8. 轴动力学配置 API (smc_api.c, smc_api.h)
+   - SMC_ConfigAxisDynamics(axis_idx, type, max_v, max_a, max_d,
+     equivalent_radius)
+   - SMC_ConfigPlannerParams(tolerance, max_centripetal_acc)
+   - 运行中修改保护: is_running || !is_trajectory_finished() 拒绝
+   - __sync_synchronize 双屏障保证 double 写入可见性
+
+9. 饥饿看门狗 (ecat_core.c -> ecat_thread_chk)
+   - 仅在解析器已关闭 (!is_running) 且队列余量 < 3 时启动
+   - 连续 5 个 10ms 周期 (50ms) 无新指令入队 → planner_recalculate(1)
+   - 防止文件末尾最后几段因 plan_count<3 被永久挂起
+
+10. CLAUDE.md 审计响应协议
+    - 新增"外部审计响应原则": 事实核对、鉴别误报、只修真实缺陷
+    - 要求输出格式: 采纳清单 + 拒绝清单及理由
+
+
 三、当前系统架构总览
 ================================================================
 
@@ -143,33 +241,76 @@ ebf3d98  feat: Phase 1 安全闭环 — 软限位接入、跟随误差监控、R
 
 线程模型:
   ecat_thread_rt      — 1ms 实时线程, SCHED_FIFO 优先级99
-    (CSP 位置命令下发, 插补运算, 跟随误差监控, 龙门同步检测)
+    (CSP 位置命令下发, 插补运算, 跟随误差监控 0x60F4, 龙门同步检测)
   ecat_thread_chk     — 10ms 非实时线程
-    (从站状态检测, RT 日志异步输出)
+    (从站状态检测, RT 日志异步输出, 队列饥饿看门狗)
   parser_thread_func  — 非实时解析线程
     (G 代码文件逐行解析, 推入命令队列)
 
 数据流:
   G代码文件 -> parse_gcode_line -> api_push_trajectory/api_push_mcode
-    -> CommandQueue_t -> planner_recalculate -> is_ready=1
-    -> ecat_thread_rt 弹出段 -> Interpolator_t 梯形/S曲线插补
-    -> 各轴 current_cmd_pos -> PDO 写入 -> 驱动器
+    -> CommandQueue_t -> planner_recalculate (mutex + plan_tail结界)
+    -> atomic_store_release(is_ready=1)
+    -> ecat_thread_rt atomic_load_acquire -> 弹出段
+    -> Interpolator_t 梯形/S曲线插补 -> 各轴 current_cmd_pos
+    -> PDO 写入 -> 驱动器
+
+关键同步机制:
+  - planner_mutex: 保护 planner_recalculate 对队列的读写原子性
+    (parser线程、看门狗线程互斥访问)
+  - _Atomic is_ready: producer (planner) release 写入,
+    consumer (RT线程) acquire 读取, C11 内存模型保证数据可见性
+  - plan_tail 结界: 已释放段 (is_ready==1) 对 planner 只读,
+    禁止覆写 RT 线程正在消费的数据
+
+TxPDO 映射 (每从站 10 字节):
+  偏移 0-1: 0x6041 状态字 (uint16)
+  偏移 2-5: 0x6064 实际位置 (int32)
+  偏移 6-9: 0x60F4 跟随误差 (int32)
 
 
-四、已知限制与后续计划
+四、已完成的 Phase 2 通用化项目
 ================================================================
 
-Phase 2 (通用化架构):
-  - 每轴独立 max_speed/max_acc/axis_type 配置 (线性/旋转)
-  - G64 参数运行时可配 (SMC_ConfigPlannerParams)
-  - 距离/速度计算区分线性轴和旋转轴
-  - G17/G18/G19 平面选择
+[已完成] 每轴独立动力学配置
+  - AxisCtrl_t 新增: axis_type, max_speed, max_acc, max_dec,
+    equivalent_radius
+  - SMC_ConfigAxisDynamics API, 运行中修改保护
+  - 短板效应限幅: 逐轴投影比 × 全局 ratio 缩放
+  - 旋转轴等效半径: mm = deg × (PI/180) × radius
+
+[已完成] G64 参数运行时可配
+  - PlannerConfig_t 全局参数: corner_tolerance, max_centripetal_acc
+  - SMC_ConfigPlannerParams API
+
+[已完成] 距离/速度计算区分线性轴和旋转轴
+  - api_push_trajectory 第二步统一量纲 → 等效 mm 位移
+  - 方向向量在纯净 mm 空间计算
+
+[已完成] 规划器线程安全
+  - planner_mutex 互斥锁
+  - plan_tail 结界保护已释放段
+  - is_ready 原子化 + C11 acquire/release 语义
+
+[已完成] 队列饥饿看门狗
+  - 解析器关闭后 50ms 无新指令触发 force_flush
+
+
+五、已知限制与后续计划
+================================================================
 
 Phase 3 (生产级加固):
   - 单轴故障隔离 (当前 dorun=0 全轴停机)
-  - G28/G93 等模态扩展
-  - 故障记录与恢复流程
-  - 驱动器对象字典 0x60F4 跟随误差直接映射
+  - G28 机械原点复归 / G93 进给率模式
+  - 故障记录持久化与恢复流程
+  - G17/G18/G19 平面选择
+  - S 曲线加减速 (当前为梯形曲线)
+
+Phase 4 (高级功能):
+  - 刀具半径补偿 (G41/G42)
+  - 多段预读缓冲优化 (当前 plan_count<3 立即释放)
+  - 实时进给率倍率 (Feed Override)
+  - 电子齿轮/凸轮模式
 
 ================================================================
   报告结束

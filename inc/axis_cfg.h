@@ -184,29 +184,12 @@ extern PlannerConfig_t g_planner_config;
 
 
 typedef enum{
-    CMD_NONE=0,
-    CMD_SET_ZERO,
-    CMD_GO_ZERO,
-    CMD_MOVE_3D,
-    CMD_MOVE_RELATIVE
-}AxisCmdType;
-
-typedef enum{
     HOLD_NORMAL=0,
     HOLD_BRAKING,
     HOLD_PAUSED,
     HOLD_RESUMING //
 
 }FeedHoldState_t;
-
-typedef struct{
-    AxisCmdType cmd;
-    double target_pos[AXIS_NUM];  //mm或度，视轴类型而定
-    double speed;    // mm/s或度/s，视轴类型而定
-    int axis_idx;
-    int execute; // 执行标志（0=待执行，1=正在执行）
-}UI_Command_t;
-
 
 typedef struct{
     int is_moving;

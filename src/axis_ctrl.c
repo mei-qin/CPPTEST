@@ -10,7 +10,6 @@
 AxisCtrl_t g_axis[AXIS_NUM];            // 五轴核心数组，全局唯一定义
 int g_all_axis_op_ready = 0;            // 五轴均使能就绪标志
 int g_all_axis_reach = 0;               // 五轴均目标到达标志
-UI_Command_t g_ui_cmd={CMD_NONE,0,0,0,0,0,0};
 Interpolator_t g_interpolator={0};
 CommandQueue_t g_cmd_queue={0};
 static double plan_cursor[AXIS_NUM]={0};
@@ -18,12 +17,6 @@ CoordManager_t g_coord_mgr={COORD_G54,{0},{0},{0}};
 PlannerConfig_t g_planner_config={0.05, 500.0};
 pthread_mutex_t planner_mutex;
 /************************ 五轴系统初始化（核心配置，修改此函数即可调整轴参数） ************************/
-static void wait_cmd_accepted(){
-    while (g_ui_cmd.execute==1)
-    {
-       osal_usleep(1000);
-    }  
-}
 static int check_soft_limits(double target_pos[AXIS_NUM]){
     for(int i=0;i<AXIS_NUM;i++){
         if(g_axis[i].enable_soft_limit){
@@ -54,14 +47,6 @@ double api_get_cursor(int axis_idx){
 void wait_motion_done(){
     while(g_interpolator.is_moving) osal_usleep(10000);
 }
-/*void api_set_zero(int axis_idx){
-    g_ui_cmd.axis_idx=axis_idx;
-    g_ui_cmd.cmd=CMD_SET_ZERO;
-    g_ui_cmd.execute=1;
-    wait_cmd_accepted();
-
-    api_sync_planner_cursor();
-}*/
 
 void api_set_zero(int axis_idx){
 

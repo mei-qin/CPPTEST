@@ -32,7 +32,6 @@ extern AxisCtrl_t g_axis[AXIS_NUM];     // 五轴控制数组（核心！）
 extern int g_all_axis_op_ready;         // 全局标志：五轴均使能就绪
 extern int g_all_axis_reach;            // 全局标志：五轴均目标到达
 extern int g_csp_ready; 
-extern UI_Command_t g_ui_cmd;           // UI命令结构体   
 extern Interpolator_t g_interpolator;   // 插补器状态结构体
 extern CommandQueue_t g_cmd_queue;      // 运动命令队列
 extern GCodeState_t g_state;             // 全局G-code状态变量

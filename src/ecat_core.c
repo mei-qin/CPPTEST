@@ -170,27 +170,6 @@ OSAL_THREAD_FUNC_RT ecat_thread_rt(void *arg)
                 }
             }
 
-            if(g_all_axis_op_ready&&g_interpolator.is_moving==0&&g_cmd_queue.head==g_cmd_queue.tail)
-            {
-                if(g_ui_cmd.execute==1)
-                {
-                    if(g_ui_cmd.cmd==CMD_SET_ZERO){
-                        for(int i=0;i<AXIS_NUM;i++){
-                            if(g_ui_cmd.axis_idx==AXIS_ALL||g_ui_cmd.axis_idx==i){
-                                int32_t current_logical_pulse=(int32_t)round(g_axis[i].current_cmd_pos*g_axis[i].pulse_per_unit);
-
-                                for(int s=0;s<g_axis[i].slave_count;s++){
-                                    g_axis[i].home_offset[s]=current_logical_pulse+g_axis[i].home_offset[s];
-                                }
-                                g_axis[i].current_cmd_pos=0;
-                                g_interpolator.current_pos[i]=0.0;
-                            }
-                        }
-                        g_ui_cmd.execute=0;
-                    }
-                }
-            }
-
             if(g_all_axis_op_ready){
 
                 if(g_interpolator.is_moving==0&&g_interpolator.is_waiting_mcode==0&&g_cmd_queue.head!=g_cmd_queue.tail){
@@ -234,7 +213,9 @@ OSAL_THREAD_FUNC_RT ecat_thread_rt(void *arg)
 
                 // 非阻塞M代码等待逻辑
                 if(g_interpolator.is_waiting_mcode){
-                    g_interpolator.mcode_wait_timer++;
+                    if(g_interpolator.mcode_wait_timer < INT32_MAX) {
+                        g_interpolator.mcode_wait_timer++;
+                    }
                     int wait_target_ms;
                     switch(g_interpolator.current_mcode){
                         case 3:  wait_target_ms=2000; break;
